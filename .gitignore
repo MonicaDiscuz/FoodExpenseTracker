@@ -1,0 +1,23 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+/.kotlin
+app/build
+app/release
+*.apk
+*.aab
+
+# 签名文件与口令不要提交
+/keystore.properties
+*.keystore
+*.jks
+
+# 已下架方案的归档：PaddleOCR 含 15MB ONNX 模型，放进 git 会让仓库永久变大
+# （README 里提到了它，本地仍在，只是不进仓库）
+/_archive/
