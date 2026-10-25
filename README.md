@@ -112,17 +112,21 @@ EAT0827/
     │   ├── ocr/                               # ★ 识图（纯 Kotlin，零 Android 依赖，可 JVM 单测）
     │   │   ├── TextLine.kt                    #   OCR 文本行（文本 + 坐标）
     │   │   ├── OcrRecognizer.kt               #   ML Kit 中文 OCR 封装（含预热、20s 超时）
-    │   │   ├── OrderScreenshotParser.kt       #   端侧纯规则解析器（几何行重建 + P1~P6 规则）
+    │   │   ├── LineGeometry.kt                #   ★ 第 0 步几何行重建（视觉块 → 语义行）+ 内部数据类
+    │   │   ├── ParserPatterns.kt              #   ★ 全部常量 / 正则 / 词表 + 文本工具
+    │   │   ├── OrderScreenshotParser.kt       #   ★ 主流程 + P1~P6 业务规则
     │   │   ├── ParsedOrder.kt                 #   解析结果（含商品明细）
     │   │   ├── LlmOrderParser.kt              #   云端结构化（DeepSeek Chat Completions）
     │   │   └── LlmJsonMapper.kt               #   纯 Kotlin 扁平/数组 JSON 解析器
     │   ├── util/
     │   │   ├── DateUtils.kt                   # 时间格式化与解析、日期/时间选择合成
     │   │   ├── DataBackup.kt                  # 一键导出/导入 zip（格式 v3）
+    │   │   ├── SafeReplace.kt                 # ★ 覆盖导入的"先写库、后删图"顺序保证
     │   │   └── ImageStorage.kt                # 图片复制到私有目录 / 删除
     │   ├── viewmodel/
     │   │   ├── CalendarViewModel.kt
     │   │   ├── RecordListViewModel.kt
+    │   │   ├── RecordFormMerge.kt             # ★ 「识别结果 → 表单」合并规则（纯函数，可纯 JVM 单测）
     │   │   ├── RecordFormViewModel.kt         # ★ 表单 + 识图三级降级链
     │   │   ├── BackupViewModel.kt
     │   │   └── StatsViewModel.kt
@@ -139,7 +143,7 @@ EAT0827/
     │           ├── stats/StatsScreen.kt
     │           ├── settings/AiSettingsScreen.kt   # ★ AI 识别设置
     │           └── ocr/OcrTestScreen.kt           # ★ OCR 调试页（仅 debug 构建可见）
-    └── test/java/com/example/foodexpense/       # 115 个单元测试
+    └── test/java/com/example/foodexpense/       # 140 个单元测试
 ```
 
 
@@ -226,7 +230,7 @@ gradle wrapper --gradle-version 8.9
 
 ```bash
 # Windows
-gradlew.bat :app:testDebugUnitTest    # 跑 115 个单元测试
+gradlew.bat :app:testDebugUnitTest    # 跑 140 个单元测试
 gradlew.bat assembleDebug             # 构建 debug APK
 gradlew.bat installDebug              # 安装到已连接设备
 # macOS / Linux
@@ -502,10 +506,64 @@ Android Studio 直接点 **Run ▶** 走的就是这条通道，通常不会被�
 
 ## 12. 当前状态
 
-- **115 个单元测试全绿**（解析器 / 几何 / 边界 / 真机 fixture / 迁移 / 备份 / JSON / 明细）
+- **140 个单元测试全绿**（解析器 / 几何 / 边界 / 真机 fixture / 迁移 / 备份 / JSON / 明细 / 识别合并 / 备份顺序）
 - debug APK 约 **33MB**（`arm64-v8a` 单 ABI）
 - 云端识别真机验收：**3 张不同订单截图 × 每张 4~5 次 = 100% 成功**
 - 多商品订单识别 + 明细展示：已真机验证通过
+
+## 13. 2026-10-25：一次小规模重构（修 P1 + 补测试 + 拆文件）
+
+起因是做了一次完整评审，挑出三件该做的事。核心原则还是那句：**"改完测试全绿"不算证据，要能证明测试会红。**
+
+### 13.1 修掉一个会造成永久数据丢失的 P1
+
+`BackupViewModel` 的覆盖导入原本是**先删旧图片、再写库**：
+
+```kotlin
+// ❌ 旧代码
+getAllRecords().flatMap { it.reviewImages }.forEach { deleteFile(it) }  // 图片先没了
+replaceAll(result.records)                                             // 这行一失败就完了
+```
+
+`replaceAll` 内部虽然有事务，但**图片删除在事务之前**。只要写库这一步失败（DB 异常 / 磁盘满 / 进程被杀），就会停在「库里还是旧记录、旧图片已被删除」的状态——点开评价全是裂图，而且**无法恢复**。覆盖导入偏偏是个高危低频操作（用户通常在换手机时用）。
+
+修法：抽出一个 `replaceRecordsThenCleanupImages`（`util/SafeReplace.kt`），把「读旧路径 / 写库 / 删文件」做成注入参数，顺序固定为 **读 → 写 → 删差集**。
+
+**为什么要抽成这个形状**：这条不变量是「顺序」，光靠注释守不住——后来的人把两行换个位置，代码看着同样合理，而真实触发需要"恰好写库失败"，手工几乎复现不了。做成注入参数后，一个纯 JVM 测试就能直接断言「写库抛异常时 delete 一次都没被调用」。
+
+> 删的时候用「旧路径 − 新记录引用的路径」的差集，不是全删旧路径。现在备份图片都会重新落盘成新文件名，理论上不重名；但那是 `ImageStorage` 的实现细节，一旦改成复用路径，全删就会把刚导入的记录指向的图片删掉。差集是零成本保险。
+
+### 13.2 给"只填空"这条契约补上测试
+
+`mergeParsed`（识别结果 → 表单）原本是 `RecordFormViewModel` 的私有方法，而 ViewModel 要 `Application` 才能构造——等于把「识别只填空、不覆盖用户已输入的内容」这条**用户唯一能直接感知的契约**锁在了测试之外。
+
+抽到同包的 `viewmodel/RecordFormMerge.kt`（纯函数，零 Android 依赖），补了 19 个纯 JVM 用例：手填的四个字段一个都不许被改、明细同样只填空、数量/平台仅在还是默认值时才被覆盖、`isRecognizing` 必须复位、`cloudError` 必须透传、以及提示文案的各种分支。
+
+这条契约坏了**没有任何异常、没有日志**——表单里就是少了几行字，可能坏几个月都没人发现。
+
+### 13.3 把 1352 行的解析器拆成三个文件
+
+| 文件 | 行数 | 职责 |
+| --- | --- | --- |
+| `ocr/LineGeometry.kt` | 253 | 第 0 步几何行重建 + `Line`/`VisualLine`/`Item` 数据类 |
+| `ocr/ParserPatterns.kt` | 369 | 全部常量、正则、词表 + 文本工具 |
+| `ocr/OrderScreenshotParser.kt` | 779 | 主流程 + P1~P6 业务规则 |
+
+**关键手段是"让调用点零改动"**：常量放到**同包的顶层声明**（`internal`）而不是 `object` 里，这样两个文件都能直接引用、不需要写限定前缀——原本散落在类体里的 47 处常量引用一个都不用动。5 个公开文本工具（`normalize` / `stripNonMoneyNumbers` / `stripDiscountSegments` / `amountsIn` / `parseQuantity`）保留成 companion 的同名转发，所以**测试文件一行没改**。
+
+> ⚠️ 转发里必须写**全包名** `com.example.foodexpense.ocr.normalize(text)`。直接写 `normalize(text)` 会解析到 companion 自己，造成无限递归。
+
+零改动换来的好处很实在：拆分前后 **115 个测试一个不差全绿**，这就是"行为没变"最硬的证据。
+
+### 13.4 反向验证结果（这一步不能省）
+
+把 bug 注射回去，确认测试真的会红：
+
+- 把删除挪回写库**之前** → `SafeReplaceTest` **4 条变红**（含核心的「写库失败时一个图片都不删」）
+- 把 `ifBlank` 改成 `?:` 覆盖 → `RecordFormMergeTest` **2 条变红**
+
+合计 6 条精准命中，恢复后全部转绿。**不会红的测试等于没写。**
+
 
 ## 开源协议
 

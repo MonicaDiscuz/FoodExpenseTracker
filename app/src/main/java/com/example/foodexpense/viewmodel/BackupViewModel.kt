@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.foodexpense.FoodExpenseApp
 import com.example.foodexpense.util.DataBackup
 import com.example.foodexpense.util.ImageStorage
+import com.example.foodexpense.util.replaceRecordsThenCleanupImages
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -67,13 +68,19 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
                 return@launch
             }
             if (replace) {
-                // 覆盖导入：先清理本机旧记录的图片（IO 线程，避免主线程卡顿）
+                // 覆盖导入：**先写库，成功后才删旧图片**。
+                // 顺序绝不能反过来——详见 [replaceRecordsThenCleanupImages] 的注释，
+                // 那里解释了"先删图再写库"会在写库失败时造成评价图片永久丢失。
                 withContext(Dispatchers.IO) {
-                    repository.getAllRecords()
-                        .flatMap { it.reviewImages }
-                        .forEach { ImageStorage.deleteFile(it) }
+                    replaceRecordsThenCleanupImages(
+                        newRecords = result.records,
+                        loadOldImagePaths = {
+                            repository.getAllRecords().flatMap { it.reviewImages }
+                        },
+                        writeRecords = { repository.replaceAll(it) },
+                        deleteFile = { ImageStorage.deleteFile(it) }
+                    )
                 }
-                repository.replaceAll(result.records)
             } else {
                 repository.appendAll(result.records)
             }

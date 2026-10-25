@@ -134,8 +134,8 @@ class RecordFormViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun formatPriceInput(price: Double): String =
-        if (price == price.toLong().toDouble()) price.toLong().toString() else price.toString()
+    // formatPriceInput / mergeParsedInto / buildRecognizeHint 已抽到同包的 RecordFormMerge.kt，
+    // 以便用纯 JVM 单测覆盖"只填空、不覆盖用户输入"这条契约（见 RecordFormMergeTest）。
 
     /**
      * 新增记录时用日历中选中的日期作为下单日期（保留当前时刻的时分）。
@@ -247,8 +247,8 @@ class RecordFormViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * 把识别结果合并进表单：**只填空字段，绝不覆盖用户已输入**。
      *
-     * 数量与平台比较特殊：默认值（1 / 美团）无法区分"用户主动选的"和"没填"，
-     * 因此仅在仍是默认值时才用识别结果覆盖。
+     * 规则本体在 [mergeParsedInto]（同包顶层函数，纯逻辑、可纯 JVM 单测）。
+     * 这里只保留一层转发，避免 ViewModel 的构造依赖把规则锁在测试之外。
      */
     private fun mergeParsed(
         s: RecordFormState,
@@ -256,50 +256,7 @@ class RecordFormViewModel(app: Application) : AndroidViewModel(app) {
         source: String,
         cloudError: String? = null,
         usage: String? = null
-    ): RecordFormState = s.copy(
-        storeName = s.storeName.ifBlank { p.storeName ?: "" },
-        productName = s.productName.ifBlank { p.productName ?: "" },
-        priceText = s.priceText.ifBlank { p.productPrice?.let(::formatPriceInput) ?: "" },
-        paidText = s.paidText.ifBlank { p.actualPaid?.let(::formatPriceInput) ?: "" },
-        quantity = if (s.quantity == 1 && p.productQuantity > 1) p.productQuantity else s.quantity,
-        // 明细同样"只填空"：用户已经手工删改过的明细，不被新的识别结果覆盖
-        items = if (s.items.isEmpty()) p.items else s.items,
-        platform = if (s.platform == Platform.MEITUAN && p.platform != null) p.platform else s.platform,
-        isRecognizing = false, recognizeError = null,
-        recognizeHint = buildHint(p, source, usage),
-        cloudError = cloudError
-    )
-
-    /** 识别成功后的核对提示：说清"取了哪个商品"和"哪些没识别到"。 */
-    /**
-     * @param source 标记这次结果来自哪条路径（"云端" / "本地"）。
-     *   必须让用户看见——否则识别对了也不知道该继续投哪条路，错了也不知道该找谁。
-     */
-    private fun buildHint(p: ParsedOrder, source: String, usage: String? = null): String {
-        val mainName = p.productName ?: "主商品"
-        val store = p.storeName
-        val head = if (p.itemCount > 1) {
-            "识别到 ${p.itemCount} 个商品，已取金额最大的「$mainName」，请核对后保存"
-        } else {
-            val suffix = if (store.isNullOrBlank()) "" else "（$store）"
-            "识别到「$mainName」$suffix，请核对后保存"
-        }
-        val missing = buildList {
-            if (p.storeName == null) add("店铺名")
-            if (p.productName == null) add("商品名")
-            if (p.productPrice == null) add("商品价格")
-            if (p.actualPaid == null) add("实付金额")
-        }
-        // 明细是"回看"用的附属信息，提示里说清留了几件，用户才知道这个功能生效了
-        val detail = if (p.items.size > 1) "；已保留 ${p.items.size} 件商品明细" else ""
-        val body = if (missing.isEmpty()) {
-            "$head$detail"
-        } else {
-            "$head$detail；未识别：${missing.joinToString("、")}"
-        }
-        val cost = usage?.let { "（$it）" }.orEmpty()
-        return "${source}识别：$body$cost"
-    }
+    ): RecordFormState = mergeParsedInto(s, p, source, cloudError, usage)
 
     // ---------- 评价字段 ----------
 
