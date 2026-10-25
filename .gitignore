@@ -21,3 +21,6 @@ app/release
 # 已下架方案的归档：PaddleOCR 含 15MB ONNX 模型，放进 git 会让仓库永久变大
 # （README 里提到了它，本地仍在，只是不进仓库）
 /_archive/
+
+# 本地发布产物（APK 与更新日志），不进仓库
+/发布产物/
